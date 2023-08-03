@@ -1,0 +1,42 @@
+library(mapproj)
+library(sf)
+library(pacman)
+p_load(deSolve,
+       tidyverse,
+       shiny,
+       shinycssloaders,
+       shinyBS,
+       readxl,
+       ggplot2,
+       data.table,
+       tidyr,
+       doParallel,
+       manipulate, 
+       dplyr, 
+       rsconnect,
+       zoo,
+       forecast,
+       dbscan,
+       dtwclust,
+       cluster,
+       fpc,
+       factoextra,
+       lubridate,
+       RColorBrewer,
+       rworldmap,
+       kableExtra,
+       leaflet,
+       raster,
+       xts,
+       plyr,
+       readr,
+       shiny,
+       shiny.i18n,
+       shinyWidgets,
+       googleLanguageR,
+       devtools,
+       DT,
+       sparkline
+)
+
+
