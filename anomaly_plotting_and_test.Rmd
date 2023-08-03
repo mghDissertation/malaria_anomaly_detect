@@ -1,0 +1,815 @@
+---
+title: "Anomaly Detect Malaria Thailand "
+output: html_notebook
+---
+
+This is a file for creating figures used in the final report and to test additional algorithms for anomaly detection. 
+```{r}
+#load required files 
+source("anomaly_thailand_app/load_data.R")
+source("anomaly_thailand_app/packages.R")
+source("anomaly_thailand_app/load_data.R")
+```
+
+
+This section plots the provincial IDs across Thailand. 
+```{r}
+
+##map ggplot with the provincial IDs
+  thaiLevel_mapid <- rworldmap::joinData2Map(df,nameMap="thaiLevel1",nameJoinIDMap="NAME_1",nameJoinColumnData="p_site_eng")
+
+    thaiLevel_mapid@data$id <- rownames(thaiLevel_mapid@data)
+    thaiLevel_mapid@data$status = as.factor(thaiLevel_mapid@data$unfilt_data.p_site_province_id)
+
+    map <- fortify(thaiLevel_mapid)
+
+    map$id <- as.integer(map$id)
+
+    #extracts the data associated with each province and connects that to each province
+    dat <- data.frame(id = thaiLevel_mapid@data$id, state = thaiLevel_mapid@data$NAME_1, status =thaiLevel_mapid@data$unfilt_data.p_site_province_id)
+    dat$id <- as.numeric(dat$id)
+
+    map_df <- inner_join(map, dat, by = "id")
+
+    #plots the data for each province
+    p <- ggplot() +
+      geom_map(data = map_df, map = map_df,
+               aes(map_id = id, x = long, y = lat, group = group, fill = factor(status)),
+               size = 0.25) +
+      coord_map() +
+      labs(x = "longitude", y = "latitude", title = "Thailand Province IDs") + coord_sf(
+        crs = 4326, default_crs = 4326,
+        xlim = c(96, 106), ylim = c(6, 20.5)
+      ) +
+      theme_minimal() + theme(legend.title = element_text(size=5),legend.text = element_text(size = 5),legend.key.size = unit(5, "mm")) + scale_fill_discrete(name = "Province IDs")
+
+  ggsave("province_id.pdf", p, width = 6, height = 4,device = "pdf")
+
+```
+
+
+Here, we plot all the malaria cases from 2012 to 2022
+```{r}
+
+cases_total <- dplyr::count(total_data, blood_draw_date)
+p <- ggplot(data = cases_total) + geom_point(aes(x = blood_draw_date, y = n),colour = "#00A2FF", size = 0.5)+  theme_minimal() + labs(y = "Malaria Case Counts", x = "Date", title = "Total Malaria Cases Across Thailand")
+
+ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/total_malaria_cases.pdf", p, width = 8, height = 4,device = "pdf")
+```
+
+Here, we test the comparison and validation function. We use the function to create plots which show is the method used are able to detect anomalous activity for dates found in literature. 
+```{r}
+##accuracy testing for each province and for each method
+#list the methods we want to compare
+  methods_list <- c("Statistical Profiling",
+                    "Predictive Confidence Interval",
+                    "Unsupervised Clustering",
+                    "Density-Based Profiling",
+                    "Density-Based Profiling with Temp and Precip",
+                    "Historical Average",
+                    "Weekly Case Previous Year",
+                    "Monthly Case Four Years",
+                    "Baseline: Weekly Three Year Median")
+  
+  #extract the unique list of province names 
+  prov_list <- unique(total_data$p_site_province_name)
+  
+  #load the outbreak csv and rename the columns 
+  outbreak_dat <- read.csv("/Users/orayasrim/Documents/ano_git/anodetect/ano_proj/outbreak_malaria_th_5.csv")
+  colnames(outbreak_dat) <- c("dates","province")
+  
+  #setting the date range we want to conduct our analysis on
+  latest_date <- as.POSIXct('2022-05-25')
+  prev_date <- as.POSIXct("2012-01-01")
+  
+  dates_filt <- seq(prev_date, latest_date, by="days")
+  
+  #function to check if anomalies have been detected in the previous 14 days 
+  inRange = function(x){
+    #checks the last 14 days for if high anomalies have been detected
+    if( x > -14 && x < 0 ) return(TRUE)
+    else{return(FALSE)}
+  }
+  
+  # iterate over methods -> rbindlist is used to create a final data table
+  # for each method, compute all anomalies in all provinces
+  dt = rbindlist(llply(methods_list, function(method){
+    
+    #iterate over provinces
+    rbindlist(llply(prov_list, function(province_name){
+      
+      #filter the data for each province 
+      data_filt <- filter_data(total_data,prev_date,latest_date,province_filter_values = province_name) #using the x time from previous date
+      
+      #check if the filtered data has reads
+      if(nrow(data_filt) > 0){ 
+        
+        #apply anomaly detection algorithm to current province data 
+        df_comp <- ano_algo(method,data_filt, total_data, prev_date,latest_date, province_name,temp_data_long, precip_data_long)
+        df_comp <- data.frame(df_comp)
+        
+        #check for obeservations where anomalies have been detected 
+        detectedAnomalies <- df_comp[df_comp$activity=="High Anomalous Activity"|df_comp$activity == "Anomalous Activity Detected",]["blood_draw_date"]
+        
+      }else{ 
+      }
+      
+      #subset for true anomalies in the current province to get vector of true dates reported
+      trueAnomalies = outbreak_dat[outbreak_dat$province == province_name,]["dates"]
+      
+      # find difference in time between all detected and true dates
+      M = outer(as.Date(detectedAnomalies$blood_draw_date), as.Date(trueAnomalies$dates), "-")
+      
+      # apply 'inrange' function to check for close dates
+      matches = apply(M, 1:2, inRange)
+      
+      # for each true anomaly check if it was detected
+      trueAnomaliesDetected = apply(matches, 2, any)
+
+      #return the province name, the method used, the total number of anomalies triggered, the number of actual anomalies tested,
+      #and the number of true anomalies caught by each method and province. 
+      return(data.table(Province = province_name, 
+                        Method = method, 
+                        NumberReported = nrow(detectedAnomalies),
+                        NumberActual = nrow(trueAnomalies),
+                        NumberActualDetected = sum(trueAnomaliesDetected)))
+    }))
+  }))
+  
+  #summarise the data and to show how many true anomalies were caught for each method 
+  dt[dt$NumberActualDetected ==1,]
+  x <- dt[, lapply(.SD, sum) , .(Method), .SDcols = NumberReported:NumberActualDetected]
+  x[, acc:= NumberActualDetected/NumberActual]
+
+
+#here we create plots for provinces we have real anomalous dates for and highlight if those observations were detected by each method. 
+for(i in 1: length(methods_list)){
+  method <- methods_list[i]
+  
+  for(i in 1:length(prov_list)){
+    province_name <- prov_list[i]
+    data_filt <- filter_data(total_data,prev_date,latest_date,province_filter_values = province_name) #using the x time from previous date
+  
+    if(nrow(data_filt) > 0){ #switch to stat profile first 
+      
+    df_comp <- ano_algo(method,data_filt, total_data, prev_date,latest_date, province_name,temp_data_long, precip_data_long)
+    
+    df_comp <- data.frame(df_comp)
+    detectedAnomalies <- df_comp[df_comp$activity=="High Anomalous Activity"|df_comp$activity == "Anomalous Activity Detected",]["blood_draw_date"]
+    
+    }else{ 
+    }
+  
+  # subset for true anomalies in the current province to get vector of true dates
+  trueAnomalies = outbreak_dat[outbreak_dat$province == province_name,]["dates"]
+  
+  # find difference in time between all detected and true dates
+  M = outer(as.Date(detectedAnomalies$blood_draw_date), as.Date(trueAnomalies$dates), "-")
+  
+  # apply 'inrange' function to check for close dates
+  matches = apply(M, 1:2, inRange)
+  
+  # for each true anomaly check if it was detected
+  trueAnomaliesDetected = apply(matches, 2, any)
+  
+  cases_total <- dplyr::count(data_filt, blood_draw_date)
+  cases_trueAnomalies <- cases_total[cases_total$blood_draw_date %in% as.Date(trueAnomalies$dates),]
+  cases_trueAnomalies$detected <- trueAnomaliesDetected
+
+  if(province_name == "Ubon Ratchathani" ||province_name == "Yala" || province_name =="Si Sa Ket"|| province_name =="Kanchanaburi" || province_name == "Tak"){
+  x <- ggplot() + geom_point(data = cases_total,aes(x = blood_draw_date, y = n, colour = "grey"), size = 0.5) + geom_point(data = cases_trueAnomalies[cases_trueAnomalies$detected == FALSE,], aes(x = blood_draw_date, y = n, colour = "brown1"), size = 1.5) +  geom_point(data = cases_trueAnomalies[cases_trueAnomalies$detected == TRUE,], aes(x = blood_draw_date, y = n, colour = "#00A600"), size = 1.5) +  scale_color_identity(name = "Classification", breaks = c("grey", "brown1","#00A600"), labels = c("Observations", "Real Anomalous Activity Not Caught","Real Anomalous Activity Caught"), guide = "legend") + theme_minimal() + scale_fill_discrete(name = "Species") + labs(title = paste("Province:", province_name, "& Method:",method), y =("Malaria Cases"), x = ("Date"))
+  
+  ggsave(file=paste("/Users/orayasrim/Documents/ano_git/anodetect/Province:", province_name, "& Method:",method,".pdf"), x, width = 8, height = 4,device = "pdf")
+  }else{
+    
+  }
+  
+  }
+}
+
+```
+
+
+
+Here, we visualise the species for each province. 
+```{r}
+#test function to calculate the accuracy of the algorithms 
+#first visualise the trends for each province 
+for(i in 1:length(prov_name)){
+  prov_name[i]
+  data_prov <- total_data[total_data$p_site_province_name == prov_name[i],]
+  
+  total_cases <- data.table(seq(as.Date("2012-01-01"), as.Date(latest_date), by ="days"))
+
+  cases <- dplyr::count(data_prov[data_prov$result_code_detail_1 == "V",], blood_draw_date)
+  cases_F <- dplyr::count(data_prov[data_prov$result_code_detail_1 == "F",], blood_draw_date)
+
+
+total_cases$vivax <- cases$n[match(as.Date(total_cases$V1),as.Date(cases$blood_draw_date))]
+total_cases$falciparum <- cases_F$n[match(as.Date(total_cases$V1),as.Date(cases_F$blood_draw_date))]
+
+x <-  ggplot(data = total_cases) + geom_point(aes(x = V1, y = vivax, colour = "#99CCFF")) + geom_point(aes(x = V1, y = falciparum, colour = "#CC99FF")) + scale_color_identity(name = "Species", breaks = c("#99CCFF", "#CC99FF"), labels = c("Vivax", "Falciparum"), guide = "legend") + theme_minimal() + scale_fill_discrete(name = "Species") + labs(y = "Malaria Case Counts", x = "Date", title = paste("Province:", prov_name[i]))
+
+print(x)
+}
+
+```
+
+
+Here, we use the historical average method for the Tak province to visualise the threshold used for classification of anomalous data points
+```{r}
+
+data_all <- total_data  %>% filter(p_site_province_name %in% prov_name[1])
+
+cases_tot <- data.table(dplyr::count(data_all, blood_draw_date))
+#cases <- dplyr::count(data, blood_draw_date)
+
+
+#create all dates -> give 0 if no cases present 
+comp_cases <- data.table(seq(as.Date("2012-01-01"), as.Date(latest_date), by ="days"))
+
+comp_cases$cases <- cases_tot$n[match(as.Date(comp_cases$V1),as.Date(cases_tot$blood_draw_date))]
+
+comp_cases$cases[is.na(comp_cases$cases)] = 0
+
+#cases_tot[, MeanVal := c(0,rollmean(y, 3), 0)]
+
+comp_cases[, MeanVal := c(rollmean(comp_cases$cases, 14, fill = NA, align ="center"))]
+
+comp_cases[ , LaggedVal := (lag(MeanVal,365) + lag(MeanVal,365*2) + lag(MeanVal,356*3))/3]
+
+comp_cases$activity = "No Anomalous Activity"
+comp_cases$activity[comp_cases$cases > comp_cases$LaggedVal] <- "Anomalous Activity Detected"
+
+p <- ggplot() +geom_point(data = comp_cases, aes(x = V1, y=cases, colour="brown1"),size = 0.5) +
+   geom_line(data = comp_cases, aes(y = comp_cases$LaggedVal *1.5, x = V1, colour = "blue")) + 
+  theme_minimal() + scale_color_identity(name = "Model",
+                          breaks = c("blue", "brown1"),
+                          labels = c("1.5*Roll Mean Previous 3 Years", "Observed Cases "),
+                          guide = "legend") + theme_minimal() +
+  labs(title = "Historical Average Method for Tak Province", y =("Cases"), x = ("Date"), colour="Compartment") + guides(color=guide_legend(title="Model")) 
+
+ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/hist_avg.pdf", p, width = 8, height = 4,device = "pdf")
+
+```
+
+
+Here, the weekly case count comparison comparison method is visualised. The threshold is created based on weekly case counts for the previous year.
+If the current observation is greater than this threshold, the observation is classifed as anomalous. 
+```{r}
+#creating the base detection using weekly data and comparing to previous year 
+
+data_all <- total_data  %>% filter(p_site_province_name %in% prov_name[1])
+
+cases_tot <- data.table(dplyr::count(data_all, blood_draw_date))
+
+#create all dates -> give 0 if no cases present 
+comp_cases <- data.table(seq(as.Date("2012-01-01"), as.Date(latest_date), by ="days"))
+
+comp_cases$cases <- cases_tot$n[match(as.Date(comp_cases$V1),as.Date(cases_tot$blood_draw_date))]
+
+comp_cases$cases[is.na(comp_cases$cases)] = 0
+
+comp_cases$dateweek <- format(comp_cases$V1, format="%Y-%U")
+
+#sum the cases by week
+comp_cases[, week_sum := sum(cases), by = dateweek]
+
+#cases_tot[, MeanVal := c(0,rollmean(y, 3), 0)]
+
+#comp_cases[, MeanVal := c(rollmean(comp_cases$cases, 7, fill = NA, align ="center"))]
+#comp_cases[, MeanVal := c(rollsum(comp_cases$cases, 7, fill = NA, align ="center"))]
+
+#the lagged value compared is the previous year
+comp_cases[ , LaggedVal := lag(week_sum,364)]
+
+comp_cases$activity = "No Anomalous Activity"
+comp_cases$activity[comp_cases$week_sum > comp_cases$LaggedVal*1.5] <- "Anomalous Activity Detected"
+
+
+p <- ggplot()+
+   geom_line(data = comp_cases, aes(y = comp_cases$LaggedVal, x = V1, colour = "blue")) +geom_point(data = comp_cases, aes(x = V1, y=week_sum, colour="brown1"), size = 0.5) + 
+  theme_minimal() + scale_color_identity(name = "Model",
+                          breaks = c("blue", "brown1"),
+                          labels = c("Previous Year Weekly Cases", "Observed Weekly Cases "),
+                          guide = "legend") + theme_minimal() +
+  labs(title = "Weekly Cumulative Case Counts for Tak Province", y =("Cases"), x = ("Date"), colour="Compartment") + guides(color=guide_legend(title="Model")) 
+
+ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/weekly_case_counts.pdf", p, width = 8, height = 4,device = "pdf")
+
+```
+
+Here, the 3 year median (baseline) method is visualised. The threshold is created based on the weekly median value from the previous three years. If the current observation is greater than the threshold, it is classified as anomalous. 
+```{r}
+
+  latest_date <- as.POSIXct('2022-05-25')
+  data_all <- total_data  %>% filter(p_site_province_name %in% prov_name[1] )
+  
+  cases_tot <- data.table(dplyr::count(data_all, blood_draw_date))
+  
+  #create all dates -> give 0 if no cases present 
+  comp_cases <- data.table(seq(as.Date("2012-01-01"), as.Date(latest_date), by ="days"))
+  
+  comp_cases$cases <- cases_tot$n[match(as.Date(comp_cases$V1),as.Date(cases_tot$blood_draw_date))]
+  
+  comp_cases$cases[is.na(comp_cases$cases)] = 0
+  
+  comp_cases$dateweek <- format(comp_cases$V1, format="%Y-%U")
+  
+  #sum the cases by week
+  comp_cases[, week_sum := sum(cases), by = dateweek]
+  
+  #the lagged value compared is the previous year
+  comp_cases[ , LaggedVal_1 := lag(week_sum,364)]
+  comp_cases[ , LaggedVal_2 := lag(week_sum,364*2)]
+  comp_cases[ , LaggedVal_3 := lag(week_sum,364*3)]
+  
+  threeyr_median <- apply(comp_cases[,LaggedVal_1:LaggedVal_3], 1, median, na.rm = TRUE)
+
+  comp_cases <- cbind(comp_cases, threeyr_median)
+  
+  
+  comp_cases$activity = "No Anomalous Activity"
+  comp_cases$activity[comp_cases$week_sum > comp_cases$threeyr_median] <- "Anomalous Activity Detected"
+  names(comp_cases)[names(comp_cases) == 'V1'] <- 'blood_draw_date'
+  
+  p <- ggplot() +geom_point(data = comp_cases, aes(x = blood_draw_date, y=week_sum, colour="brown1"),size = 0.5) +
+   geom_line(data = comp_cases, aes(y = threeyr_median, x = blood_draw_date, colour = "blue")) + 
+  theme_minimal() + scale_color_identity(name = "Model",
+                          breaks = c("blue", "brown1"),
+                          labels = c("Previous Weekly Three Year Median", "Observed Weekly Cases "),
+                          guide = "legend") + theme_minimal() +
+  labs(title = "Three Year Median Method for Tak Province", y =("Cases"), x = ("Date"), colour="Compartment") + guides(color=guide_legend(title="Model")) 
+  
+  ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/three_year_median.pdf", p, width = 8, height = 4,device = "pdf")
+
+```
+
+
+This is testing a Poisson model to the dat and comparing the weekly case counts. This method was not added to the final app.
+
+```{r}
+library(fitdistrplus)
+#creating the base detection using weekly data and comparing to previous year 
+
+data_all <- total_data  %>% filter(p_site_province_name %in% prov_name[1])
+
+cases_tot <- data.table(dplyr::count(data_all, blood_draw_date))
+
+#create all dates -> give 0 if no cases present 
+comp_cases <- data.table(seq(as.Date("2012-01-01"), as.Date(latest_date), by ="days"))
+
+comp_cases$cases <- cases_tot$n[match(as.Date(comp_cases$V1),as.Date(cases_tot$blood_draw_date))]
+
+comp_cases$cases[is.na(comp_cases$cases)] = 0
+
+comp_cases$dateweek <- format(comp_cases$V1, format="%Y-%U")
+
+#sum the cases by week
+comp_cases[, week_sum := sum(cases), by = dateweek]
+
+#create week summary 
+week_sum <- data.frame(comp_cases$dateweek,comp_cases$week_sum)
+week_sum <- week_sum[!duplicated(week_sum),]
+
+cases <- rpois(comp_cases$cases, lambda = 1.3)
+plot(rpois(500, lambda = 1.3), type = "l")
+
+fitdist(cases, "pois", "mle") 
+#here we find that the data gives a lambda estimate of 1.308
+pois <- (dpois(week_sum$comp_cases.week_sum, lambda = 1.308))
+
+plot(pois)
+plot(dpois(week_sum$comp_cases.week_sum, lambda = 1.308, log = TRUE))
+
+
+```
+
+
+Here, the monthly case comparison method is visualised (referenced in Civilian-military malaria outbreak response in Thailand: an example of multi-stakeholder engagement for malaria elimination paper).
+
+```{r}
+#creating the base detection using weekly data and comparing to previous year 
+
+data_all <- total_data  %>% filter(p_site_province_name %in% prov_name[1])
+
+cases_tot <- data.table(dplyr::count(data_all, blood_draw_date))
+
+#create all dates -> give 0 if no cases present 
+comp_cases <- data.table(seq(as.Date("2012-01-01"), as.Date(latest_date), by ="days"))
+
+comp_cases$cases <- cases_tot$n[match(as.Date(comp_cases$V1),as.Date(cases_tot$blood_draw_date))]
+
+comp_cases$cases[is.na(comp_cases$cases)] = 0
+
+comp_cases$datemonth <- format(comp_cases$V1, format="%Y-%m")
+
+#sum the cases by month
+comp_cases[, month_sum := sum(cases), by = datemonth]
+comp_cases[, average_fouryr := (lag(month_sum,364) + lag(month_sum,364*2) + lag(month_sum,364*3) + lag(month_sum,364*4))/4]
+
+comp_cases[ , LaggedVal_1 := lag(average_fouryr,364)]
+comp_cases[ , LaggedVal_2 := lag(average_fouryr,364*2)]
+comp_cases[ , LaggedVal_3 := lag(average_fouryr,364*3)]
+comp_cases[ , LaggedVal_4 := lag(average_fouryr,364*4)]
+
+row_sd <- apply(comp_cases[,LaggedVal_1:LaggedVal_4], 1, sd, na.rm = TRUE)
+
+comp_cases <- cbind(comp_cases, sd = 2*row_sd)
+
+comp_cases$activity = "No Anomalous Activity"
+comp_cases$activity[comp_cases$month_sum > comp_cases$average_fouryr + comp_cases$sd] <- "Anomalous Activity Detected"
+
+p <- ggplot()+
+   geom_ribbon(data = comp_cases, aes(y = average_fouryr, x = V1,ymin = average_fouryr, ymax = average_fouryr + sd, fill = "2 SD"),alpha = 0.5) +
+   geom_ribbon(data = comp_cases, aes(y = average_fouryr, x = V1,ymin = average_fouryr, ymax = average_fouryr + sd/2, fill = "1 SD"),alpha = 0.5)  +  geom_point(data = comp_cases, aes(x = V1, y=month_sum, colour ="brown1"),size = 0.5)  +geom_line(data = comp_cases, aes(x = V1, y=average_fouryr, colour="blue")) + 
+  theme_minimal() + scale_color_identity(name = "Model",
+                          breaks = c("brown1", "blue", "purple", "orange"),
+                          labels = c("Observed Data", "Mean Monthly Cases Previous 4 Years", "1SD", "2SD"),
+                          guide = "legend") + theme_minimal() +
+  labs(title = "Monthly Cumulative Cases for Tak Province", y =("Cases"), x = ("Date"), colour="Compartment") + guides(color=guide_legend(title="Model")) + scale_fill_manual("",values=c("purple","orange"))
+
+ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/mean_monthly.pdf", p, width = 8, height = 4,device = "pdf")
+
+```
+
+
+Code for visualising the data based on the species and border type. Additional visualisation is added for cases across all provinces. 
+```{r}
+
+df <- total_data
+
+df <- as_tibble(df) %>% dplyr::select(org_type, blood_draw_date, p_site_province_id, result_code_detail_1,  type_border)
+
+ggplot(df) +
+  aes(x = blood_draw_date, fill = result_code_detail_1) +
+  geom_histogram(bins = 30L) +
+  scale_fill_hue(direction = 1) +
+  theme_minimal() +
+  facet_wrap(vars(org_type))
+
+ggplot(df) +
+  aes(x = blood_draw_date, fill = result_code_detail_1) +
+  geom_histogram(bins = 30L) +
+  scale_fill_hue(direction = 1) +
+  theme_minimal() +
+  facet_wrap(vars(org_type))
+
+ggplot(df) +
+  aes(x = blood_draw_date, fill = result_code_detail_1) +
+  geom_bar() +
+  scale_fill_hue(direction = 1) +
+  theme_minimal() +
+  facet_wrap(vars(p_site_province_id))
+
+ggplot(df) +
+  aes(x = blood_draw_date, fill = result_code_detail_1) +
+  geom_bar() +
+  scale_fill_hue(direction = 1) +
+  theme_minimal() +
+  facet_wrap(vars(type_border))
+
+camp_dat <- total_data[total_data$org_type =="camp",]
+
+camp_dat <- camp_dat[order(camp_dat$blood_draw_date),]
+
+camp_inc <- count(camp_dat, blood_draw_date)
+
+plot(camp_inc$blood_draw_date, camp_inc$n, type = 'l')
+
+```
+
+
+Here, the statistical profiling method is visualised for the Tak province. Activity bands are created based on the standard deviations. Observations having case coutns higher than 3 standard deviations above the mean is classified as anomalous. 
+```{r}
+library("zoo")
+
+test_prov <- total_data %>% dplyr::select(blood_draw_date, p_site_province_id, type_border) %>%
+  filter(p_site_province_id == 63)
+
+test_prov
+
+#count the cases for each data in this province 
+cases <- dplyr::count(test_prov, blood_draw_date)
+plot(cases$blood_draw_date, cases$n, type = 'l')
+
+#rolling average method
+moving_average <- rollmean(cases$n, k = 7, na.pad = TRUE)
+
+df = data.frame(moving_average)
+
+cases$mov_avg = df$moving_average
+
+cases$sd1 = sd(cases$mov_avg, na.rm=TRUE)
+cases$sd2 = 2*cases$sd1
+cases$sd3 = 3*cases$sd1
+
+cases <- data.frame(cases)
+
+cases$activity = "Medium Anomalous Activity"
+cases$activity[cases$n > cases$mov_avg + cases$sd3] <- "High Anomalous Activity"
+cases$activity[cases$n < cases$mov_avg + cases$sd2] <- "Low Anomalous Activity"
+
+
+##showing just the lower bound
+p <- ggplot()+
+   geom_ribbon(data = cases, aes(y = mov_avg, x = cases$blood_draw_date,ymin = mov_avg, ymax = mov_avg + sd3, fill = "3 SD"),alpha = 0.5) + geom_ribbon(data = cases, aes(y = mov_avg, x = cases$blood_draw_date,ymin = mov_avg, ymax = mov_avg + sd2, fill = "2 SD"),alpha = 0.5) + geom_ribbon(data = cases, aes(y = mov_avg, x = cases$blood_draw_date,ymin = mov_avg, ymax = mov_avg + sd1, fill = "1 SD"),alpha = 0.5) +  geom_point(data = cases, aes(x = blood_draw_date, y=n, colour ="brown1"),size = 0.5)  +geom_line(data = cases, aes(x = cases$blood_draw_date, y=mov_avg, colour="blue")) + 
+  theme_minimal() + scale_color_identity(name = "Model",
+                          breaks = c("brown1", "blue", "purple", "orange","violet"),
+                          labels = c("Observed Data", "Rolling Average", "1SD", "2SD","3SD"),
+                          guide = "legend") + theme_minimal() +
+  labs(title = "Statistical Profiling for Tak Province", y =("Cases"), x = ("Date"), colour="Compartment") + guides(color=guide_legend(title="Model")) + scale_fill_manual("",values=c("purple","orange","violet"))
+
+
+ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/statistical_profiling.pdf", p, width = 8, height = 4,device = "pdf")
+
+```
+
+
+Here, the predicitive confidence interval method is viualised for the Tak province. 
+```{r}
+library(forecast)
+
+date <- as.POSIXct(cases$blood_draw_date)
+
+test <- cases$n
+
+#divide the dataset 
+div <- length(test)-100
+train <- test[1:div]
+test_mod <- test[div: length(test)]
+
+model <- auto.arima(train) 
+
+forecast_data <- forecast(model, length(test_mod)) 
+
+print(forecast_data)
+
+error <- test_mod - forecast_data$mean
+
+
+plot(model)
+plot(forecast_data, main = "forecasting_data for cases")
+
+#after building the forecast model, we now want to calculate the mean absolute percentage error-> to come up with a confidence interval or a confidence interval band for the predicted values and the actual data point for which is falling beyond the confidence interval is an anomaly 
+
+#rolling window is a week 
+moving_avg <- rollmean(error, k = 7, na.pad = TRUE)
+
+moving = data.frame(moving_avg)
+
+moving
+
+moving$sd1 = sd(moving$moving_avg,na.rm=TRUE)
+moving$sd2 = 2*moving$sd1
+moving$sd3 = 3*moving$sd1
+
+moving
+
+#get dates from test set 
+moving$dates <- cases$blood_draw_date[div: length(test)]
+
+#isolate actual data we forecasted
+moving$actual_case <- cases$n[div:length(test)]
+
+#classify here
+moving$activity = "Medium Anomalous Activity"
+moving$activity[moving$actual_case > moving$moving_avg + moving$sd3] <- "High Anomalous Activity"
+moving$activity[moving$actual_case < moving$moving_avg + moving$sd2] <- "Low Anomalous Activity"
+
+p <- ggplot()+
+   geom_ribbon(data = moving, aes(y = moving_avg, x = dates,ymin = moving_avg , ymax = moving_avg + sd3, fill = "3 SD"),alpha = 0.5) + geom_ribbon(data = moving, aes(y = moving_avg, x = dates,ymin = moving_avg, ymax = moving_avg + sd2, fill = "2 SD"),alpha = 0.5) + geom_ribbon(data = moving, aes(y = moving_avg, x = dates,ymin = moving_avg, ymax = moving_avg + sd1, fill = "1 SD"),alpha = 0.5) +  geom_point(data = moving, aes(x = dates, y= actual_case, colour ="brown1"),size = 0.5) +geom_line(data = moving, aes(x = dates, y=moving_avg, colour="blue")) + 
+  theme_minimal() + scale_color_identity(name = "Model",
+                          breaks = c("brown1", "blue", "purple", "orange","violet"),
+                          labels = c("Observed Data", "Rolling Error Average", "1SD", "2SD","3SD"),
+                          guide = "legend") + theme_minimal() +
+  labs(title = "Predictive Confidence Interval for Tak Province", y =("Cases"), x = ("Date (2022)"), colour="Compartment") + guides(color=guide_legend(title="Model")) + scale_fill_manual("",values=c("purple","orange","violet"))
+
+ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/predictive_CI.pdf", p, width = 8, height = 4,device = "pdf")
+
+```
+
+
+Here, we are visualising unsupervised learning methods using dbscan and tsclust() for Tak province.
+```{r}
+#the points that didn't fit into a cluster is an labelled as an anomaly
+library (dbscan)
+test_prov <- total_data %>% dplyr::select(blood_draw_date, p_site_province_id, type_border) %>%
+  filter(p_site_province_id == 63)
+
+test_prov
+
+cases <- dplyr::count(total_data, blood_draw_date)
+#define data 
+cases_US <- as.data.frame(cases)
+cases_US
+
+test <- cases_US$n
+
+kNNdistplot(as.matrix(na.omit(test)), k=3) %>% abline(h = 0.45, lty = 2)
+
+dbscanResult <- dbscan(as.data.frame(test), eps= 10, MinPts =  5)
+
+dbscanResult
+
+dbscanResult$cluster
+
+#identify anomalies and plot them 
+#function dbscan very sensitive to input paramters.
+cases_US$cluster = dbscanResult$cluster
+
+cases_US
+
+#sorting clusters from min to max
+cluster_res <- table(dbscanResult$cluster)
+cluster_res <- data.frame(cluster_res[order(cluster_res,decreasing = FALSE)])
+
+#remove all levels 
+cluster_res$Var1 <- as.numeric(as.character(cluster_res$Var1))
+
+#classifying the acitivity
+cases_US$activity = "No Anomalous Activity"
+cases_US$activity[cases_US$cluster == cluster_res$Var1[1]] <- "Anomalous Activity"
+
+
+p <- ggplot()+
+  geom_point(data = cases_US, aes(x = blood_draw_date, y=n, colour = cluster), size = 0.5) + 
+  theme_minimal()  +
+  labs(title = "DBSCAN for Tak Province", y =("Cases"), x = ("Date")) 
+
+ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/dbscan.pdf", p, width = 7, height = 4,device = "pdf")
+
+#try unsupervised clustering now with tsclust()
+library("dtwclust")
+vignette("dtwclust")
+clust_dat <- as.data.frame(cases$n)
+
+pc <- tsclust(as.data.frame(cases$n), type = "partitional", k = 2L, 
+              distance = "dtw_basic", centroid = "pam", 
+              seed = 3247L, trace = TRUE,
+              args = tsclust_args(dist = list(window.size = 20L)))
+plot(pc)
+
+
+hc <- tsclust(clust_dat, type = "hierarchical", k = 2L, 
+              distance = "sbd", trace = TRUE,
+              control = hierarchical_control(method = "average"))
+
+plot(hc)
+
+clust_dat$cluster <- hc@cluster
+
+#summary of cluster information
+hc@clusinfo
+
+clust_dat$activity = "No Anomalous Activity"
+clust_dat$activity[clust_dat$cluster == nrow(hc@clusinfo)] <- "Anomalous Activity"
+
+```
+
+Here, we visualise the precipitation and temperature data
+```{r}
+cases <- as.data.frame(cases)
+
+#importing the mean temp across thailand 
+temp_thai <- as.data.frame(read.csv("tas_timeseries_monthly_cru_1901-2021_THA.csv", header = FALSE))
+#set column names 
+colnames(temp_thai) <- temp_thai[3,]
+
+#remove the rows 
+temp_thai <- temp_thai[-1:-3,]
+colnames(temp_thai)[1] <- 'year'
+temp_thai$year <- factor(temp_thai$year)
+
+temp_data_long <- gather(temp_thai, month, measurement, Jan:Dec, factor_key=TRUE)
+
+temp_data_long <- temp_data_long[order(temp_data_long$year), ]
+
+temp_data_long$month <- match(temp_data_long$month,month.abb)
+
+temp_data_long$year <- as.numeric(as.character(temp_data_long$year))
+
+temp_data_long <- within(temp_data_long, blood_draw_date <- sprintf("%d-%02d", year, month))
+
+temp_data_long$blood_draw_date <- as.Date(paste(temp_data_long$blood_draw_date, "-01", sep=""))
+
+
+#now we merge the cases based on 
+combined_dat <- left_join(cases, temp_data_long, by=c("blood_draw_date"))
+
+combined_dat$approx_temp <- approx(combined_dat$blood_draw_date, combined_dat$measurement, combined_dat$blood_draw_date)$y
+
+#import precipitation data 
+precip_thai <- as.data.frame(read.csv("pr_timeseries_monthly_cru_1901-2021_THA.csv", header = FALSE))
+#set column names 
+colnames(precip_thai) <- precip_thai[3,]
+
+#remove the rows - change spelling 
+precip_thai <- precip_thai[-1:-3,]
+colnames(precip_thai)[1] <- 'year'
+precip_thai$year <- factor(precip_thai$year)
+
+precip_data_long <- gather(precip_thai, month, measurement, Jan:Dec, factor_key=TRUE)
+
+precip_data_long <- precip_data_long[order(precip_data_long$year), ]
+
+precip_data_long$month <- match(precip_data_long$month,month.abb)
+
+precip_data_long$year <- as.numeric(as.character(precip_data_long$year))
+
+precip_data_long <- within(precip_data_long, blood_draw_date <- sprintf("%d-%02d", year, month))
+
+precip_data_long$blood_draw_date <- as.Date(paste(precip_data_long$blood_draw_date, "-01", sep=""))
+
+#now we merge the cases based on 
+
+total_precip_temp_data <- left_join(combined_dat, precip_data_long, by=c("blood_draw_date"))
+
+total_precip_temp_data$approx_precip <- approx(total_precip_temp_data$blood_draw_date, total_precip_temp_data$measurement.y, total_precip_temp_data$blood_draw_date)$y
+
+head(total_precip_temp_data)
+
+
+x <-  ggplot(data = subset(total_precip_temp_data, !is.na(measurement.x))) + geom_line(aes(x = blood_draw_date, y = as.numeric(measurement.x))) + theme_minimal() + scale_fill_discrete(name = "Temperature") + labs(y = "Temperature (celsius) ", x = "Date", title = "Temperature Across Thailand from 2012:2022")
+
+ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/temp_data.pdf", x, width = 7, height = 4,device = "pdf")
+
+
+x <-  ggplot(data = subset(total_precip_temp_data, !is.na(measurement.y))) + geom_line(aes(x = blood_draw_date, y = as.numeric(measurement.y))) + theme_minimal() + scale_fill_discrete(name = "Precipitation") + labs(y = "Precipitation (mm) ", x = "Date", title = "Precipitation Across Thailand from 2012:2022")
+
+ggsave("/Users/orayasrim/Documents/ano_git/anodetect/figures/precip_data.pdf", x, width = 7, height = 4,device = "pdf")
+
+
+#testing dbscan with temperature ####
+cases_temp <- total_precip_temp_data[,c("n","approx_temp")]
+
+cases_temp <- scale(cases_temp)
+
+# to plot the eps values
+eps_plot = kNNdistplot(na.omit(cases_temp), k=3)
+
+# to draw an optimum line
+eps_plot %>% abline(h = 0.45, lty = 2)
+
+db_temp <- dbscan(na.omit(cases_temp), eps = 0.45, MinPts =  5)
+
+db_temp
+
+fviz_cluster(db_temp, na.omit(cases_temp), geom = "point")
+
+
+#testing dbscan with precip ####
+cases_precip <- total_precip_temp_data[,c("n","approx_precip")]
+
+cases_precip <- scale(cases_precip)
+
+# to plot the eps values
+eps_plot = kNNdistplot(na.omit(cases_precip), k=3)
+
+# to draw an optimum line
+eps_plot %>% abline(h = 0.45, lty = 2)
+
+db_precip <- dbscan(na.omit(cases_precip), eps = 0.9, MinPts =  5)
+
+db_precip
+
+fviz_cluster(db_precip, na.omit(cases_precip), geom = "point")
+
+#testing dbscan with precip and temp ####
+cases_precip_temp <- total_precip_temp_data[,c("n","approx_precip","approx_temp")]
+
+cases_precip_temp <- scale(cases_precip_temp)
+
+# to plot the eps values
+eps_plot = kNNdistplot(na.omit(cases_precip_temp), k=3)
+
+# to draw an optimum line
+eps_plot %>% abline(h = 0.45, lty = 2)
+
+db_precip_temp <- dbscan(na.omit(cases_precip_temp), eps = 0.9, MinPts =  5)
+
+db_precip_temp
+
+fviz_cluster(db_precip_temp, na.omit(cases_precip_temp), geom = "point")
+
+```
+
+Here, unsupervised clustering is tested for cases combined with precipitation and temperature data
+```{r}
+
+library("dtwclust")
+
+pc <- tsclust(as.data.frame(na.omit(cases_precip_temp)), type = "partitional", k = 2L, 
+              distance = "dtw_basic", centroid = "pam", 
+              seed = 3247L, trace = TRUE,
+              args = tsclust_args(dist = list(window.size = 20L)))
+plot(pc)
+
+hc <- tsclust(as.data.frame(na.omit(cases_precip_temp)), type = "hierarchical", k = 15L, 
+              distance = "sbd", trace = TRUE,
+              control = hierarchical_control(method = "average"))
+
+plot(hc)
+
+```
+
