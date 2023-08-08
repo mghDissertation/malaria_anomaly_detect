@@ -1,4 +1,4 @@
-# Project Title: Developing an Anomaly Detection System for Early Warning of malaria Outbreaks in Thailand
+# Project Title: Early Warning Systems For Malaria Outbreaks in Thailand: An Anomaly Detection Approach
 
 ## Project Description: 
 The aim of this research is to propose an early detection system to support the malaria
