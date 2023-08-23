@@ -190,6 +190,8 @@ pred_CI <- function(totalData,previousDate, latestDate, province) {
   #isolate actual data we forecasted
   moving$actual_case <- cases$n[div:length(case_dat)]
   
+  moving$pred <- forecast_data$mean
+  
   #replace NAs with the closest values
   moving <- moving %>%
     fill(moving_avg)
@@ -197,10 +199,15 @@ pred_CI <- function(totalData,previousDate, latestDate, province) {
   moving <- moving %>%
     fill(moving_avg, .direction = "up")
   
-  #define anomalous data points. Highly anomalous data points are defined as being 3 standard deviations greater than the mean error
+  # #define anomalous data points. Highly anomalous data points are defined as being 3 standard deviations greater than the mean error
+  # moving$activity = "Medium Anomalous Activity"
+  # moving$activity[moving$actual_case > moving$moving_avg + moving$sd3] <- "High Anomalous Activity"
+  # moving$activity[moving$actual_case < moving$moving_avg + moving$sd2] <- "Low Anomalous Activity"
+  
+  #define anomalous data points. Highly anomalous data points are defined as being 3 standard deviations greater than the predicted value
   moving$activity = "Medium Anomalous Activity"
-  moving$activity[moving$actual_case > moving$moving_avg + moving$sd3] <- "High Anomalous Activity"
-  moving$activity[moving$actual_case < moving$moving_avg + moving$sd2] <- "Low Anomalous Activity"
+  moving$activity[moving$actual_case > moving$pred + moving$sd3] <- "High Anomalous Activity"
+  moving$activity[moving$actual_case < moving$pred + moving$sd2] <- "Low Anomalous Activity"
   
   names(moving)[names(moving) == "actual_case"] <- "cases"
   return(moving)
